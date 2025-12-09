@@ -18,13 +18,6 @@ import {
   FormMessage,
 } from "@/components/ui/form";
 import {
-  Select,
-  SelectContent,
-  SelectItem,
-  SelectTrigger,
-  SelectValue,
-} from "@/components/ui/select";
-import {
   Popover,
   PopoverContent,
   PopoverTrigger,
@@ -48,7 +41,12 @@ import {
 } from "@/components/ui/table";
 import { useToast } from "@/hooks/use-toast";
 import { apiRequest, queryClient } from "@/lib/queryClient";
-import type { Player, Subscription, PaymentWithPlayer, Settings } from "@shared/schema";
+import type {
+  Player,
+  Subscription,
+  PaymentWithPlayer,
+  Settings,
+} from "@shared/schema";
 
 const paymentFormSchema = z.object({
   playerId: z.string().min(1, "Выберите игрока"),
@@ -65,6 +63,9 @@ export default function PaymentsPage() {
   const [playerSearchQuery, setPlayerSearchQuery] = useState("");
   const [selectedPlayer, setSelectedPlayer] = useState<Player | null>(null);
   const [lastAmount, setLastAmount] = useState<number>(430);
+  const [lastSubscriptionId, setLastSubscriptionId] = useState<string | null>(
+    null
+  );
 
   const dateString = format(selectedDate, "yyyy-MM-dd");
 
@@ -72,11 +73,14 @@ export default function PaymentsPage() {
     queryKey: ["/api/players"],
   });
 
-  const { data: subscriptions = [], isLoading: subscriptionsLoading } = useQuery<Subscription[]>({
-    queryKey: ["/api/subscriptions"],
-  });
+  const { data: subscriptions = [], isLoading: subscriptionsLoading } =
+    useQuery<Subscription[]>({
+      queryKey: ["/api/subscriptions"],
+    });
 
-  const { data: payments = [], isLoading: paymentsLoading } = useQuery<PaymentWithPlayer[]>({
+  const { data: payments = [], isLoading: paymentsLoading } = useQuery<
+    PaymentWithPlayer[]
+  >({
     queryKey: ["/api/payments", dateString],
     queryFn: async () => {
       const res = await fetch(`/api/payments/${dateString}`);
@@ -98,36 +102,18 @@ export default function PaymentsPage() {
     },
   });
 
-  const createPaymentMutation = useMutation({
-    mutationFn: async (data: PaymentFormValues) => {
-      return apiRequest("POST", "/api/payments", {
-        ...data,
-        date: dateString,
-      });
-    },
-    onSuccess: () => {
-      queryClient.invalidateQueries({ queryKey: ["/api/payments", dateString] });
-      queryClient.invalidateQueries({ queryKey: ["/api/players"] });
-      toast({
-        title: "Платёж сохранён",
-        description: `Оплата на сумму ${form.getValues("amount")} ₽ добавлена`,
-      });
-      setLastAmount(form.getValues("amount"));
-      form.reset({
-        playerId: "",
-        amount: form.getValues("amount"),
-        subscriptionId: null,
-      });
-      setSelectedPlayer(null);
-    },
-    onError: () => {
-      toast({
-        title: "Ошибка",
-        description: "Не удалось сохранить платёж",
-        variant: "destructive",
-      });
-    },
-  });
+  const watchedSubscriptionId = form.watch("subscriptionId");
+
+  const selectedSubscription = subscriptions.find(
+    (s) => s.id === watchedSubscriptionId
+  );
+
+  const currentPlayerSubscription = selectedPlayer
+    ? subscriptions.find((s) => s.id === selectedPlayer.subscriptionId)
+    : null;
+
+  const totalPayments = payments.length;
+  const totalSum = payments.reduce((sum, p) => sum + p.amount, 0);
 
   const filteredPlayers = useMemo(() => {
     if (!playerSearchQuery.trim()) return players;
@@ -140,16 +126,67 @@ export default function PaymentsPage() {
     );
   }, [players, playerSearchQuery]);
 
-  const selectedSubscription = subscriptions.find(
-    (s) => s.id === form.watch("subscriptionId")
-  );
+  // помощник: выбрать абонемент и пересчитать сумму
+  function handleSelectSubscription(subId: string | null) {
+    form.setValue("subscriptionId", subId);
+    setLastSubscriptionId(subId);
 
-  const currentPlayerSubscription = selectedPlayer
-    ? subscriptions.find((s) => s.id === selectedPlayer.subscriptionId)
-    : null;
+    // если есть базовая цена — пересчитываем стоимость списания
+    if (!settings?.baseTrainingPrice) return;
 
-  const totalPayments = payments.length;
-  const totalSum = payments.reduce((sum, p) => sum + p.amount, 0);
+    if (!subId) {
+      // без абонемента — просто базовая цена
+      form.setValue("amount", settings.baseTrainingPrice);
+      return;
+    }
+
+    const sub = subscriptions.find((s) => s.id === subId);
+    if (!sub) return;
+
+    const newAmount = Math.round(
+      settings.baseTrainingPrice * sub.coefficient
+    );
+    form.setValue("amount", newAmount);
+  }
+
+  const createPaymentMutation = useMutation({
+    mutationFn: async (data: PaymentFormValues) => {
+      return apiRequest("POST", "/api/payments", {
+        ...data,
+        date: dateString,
+      });
+    },
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["/api/payments", dateString] });
+      queryClient.invalidateQueries({ queryKey: ["/api/players"] });
+
+      const amount = form.getValues("amount");
+      const currentSubId = form.getValues("subscriptionId");
+
+      toast({
+        title: "Платёж сохранён",
+        description: `Оплата на сумму ${amount} ₽ добавлена`,
+      });
+
+      setLastAmount(amount);
+      setLastSubscriptionId(currentSubId ?? null);
+
+      // автофокус на том же абонементе и той же сумме
+      form.reset({
+        playerId: "",
+        amount,
+        subscriptionId: currentSubId ?? null,
+      });
+      setSelectedPlayer(null);
+    },
+    onError: () => {
+      toast({
+        title: "Ошибка",
+        description: "Не удалось сохранить платёж",
+        variant: "destructive",
+      });
+    },
+  });
 
   const onSubmit = (data: PaymentFormValues) => {
     createPaymentMutation.mutate(data);
@@ -172,12 +209,19 @@ export default function PaymentsPage() {
   return (
     <div className="p-6 max-w-7xl mx-auto">
       <div className="flex items-center justify-between gap-4 mb-6">
-        <h1 className="text-2xl font-semibold text-foreground" data-testid="text-page-title">
+        <h1
+          className="text-2xl font-semibold text-foreground"
+          data-testid="text-page-title"
+        >
           Ввод оплат
         </h1>
         <Popover>
           <PopoverTrigger asChild>
-            <Button variant="outline" className="gap-2" data-testid="button-date-picker">
+            <Button
+              variant="outline"
+              className="gap-2"
+              data-testid="button-date-picker"
+            >
               <CalendarIcon className="w-4 h-4" />
               {format(selectedDate, "d MMMM yyyy", { locale: ru })}
             </Button>
@@ -197,18 +241,26 @@ export default function PaymentsPage() {
         <div className="lg:col-span-2">
           <Card>
             <CardHeader className="pb-4">
-              <CardTitle className="text-lg font-medium">Новый платеж</CardTitle>
+              <CardTitle className="text-lg font-medium">
+                Новый платеж
+              </CardTitle>
             </CardHeader>
             <CardContent>
               <Form {...form}>
-                <form onSubmit={form.handleSubmit(onSubmit)} className="space-y-4">
+                <form
+                  onSubmit={form.handleSubmit(onSubmit)}
+                  className="space-y-4"
+                >
                   <FormField
                     control={form.control}
                     name="playerId"
                     render={({ field }) => (
                       <FormItem>
                         <FormLabel>Игрок</FormLabel>
-                        <Popover open={playerSearchOpen} onOpenChange={setPlayerSearchOpen}>
+                        <Popover
+                          open={playerSearchOpen}
+                          onOpenChange={setPlayerSearchOpen}
+                        >
                           <PopoverTrigger asChild>
                             <FormControl>
                               <Button
@@ -224,7 +276,10 @@ export default function PaymentsPage() {
                               </Button>
                             </FormControl>
                           </PopoverTrigger>
-                          <PopoverContent className="w-full p-0" align="start">
+                          <PopoverContent
+                            className="w-full p-0"
+                            align="start"
+                          >
                             <Command>
                               <CommandInput
                                 placeholder="Поиск игрока..."
@@ -244,8 +299,14 @@ export default function PaymentsPage() {
                                         setSelectedPlayer(player);
                                         setPlayerSearchOpen(false);
                                         setPlayerSearchQuery("");
+
+                                        // если у игрока есть абонемент — подставляем его и пересчитываем сумму
                                         if (player.subscriptionId) {
-                                          form.setValue("subscriptionId", player.subscriptionId);
+                                          handleSelectSubscription(
+                                            player.subscriptionId
+                                          );
+                                        } else {
+                                          handleSelectSubscription(null);
                                         }
                                       }}
                                       data-testid={`player-option-${player.id}`}
@@ -288,8 +349,13 @@ export default function PaymentsPage() {
                         </span>
                       </div>
                       <div className="flex justify-between">
-                        <span className="text-muted-foreground">Текущий абонемент:</span>
-                        <span className="font-medium" data-testid="text-player-subscription">
+                        <span className="text-muted-foreground">
+                          Текущий абонемент:
+                        </span>
+                        <span
+                          className="font-medium"
+                          data-testid="text-player-subscription"
+                        >
                           {currentPlayerSubscription?.name || "Без абонемента"}
                         </span>
                       </div>
@@ -307,7 +373,9 @@ export default function PaymentsPage() {
                             type="number"
                             placeholder="0"
                             {...field}
-                            onChange={(e) => field.onChange(Number(e.target.value))}
+                            onChange={(e) =>
+                              field.onChange(Number(e.target.value))
+                            }
                             data-testid="input-amount"
                           />
                         </FormControl>
@@ -316,43 +384,63 @@ export default function PaymentsPage() {
                     )}
                   />
 
+                  {/* новый блок: абонементы как кнопки */}
                   <FormField
                     control={form.control}
                     name="subscriptionId"
-                    render={({ field }) => (
+                    render={() => (
                       <FormItem>
                         <FormLabel>Абонемент</FormLabel>
-                        <Select
-                          onValueChange={(value) =>
-                            field.onChange(value === "none" ? null : value)
-                          }
-                          value={field.value || "none"}
-                        >
-                          <FormControl>
-                            <SelectTrigger data-testid="select-subscription">
-                              <SelectValue placeholder="Выберите абонемент" />
-                            </SelectTrigger>
-                          </FormControl>
-                          <SelectContent>
-                            <SelectItem value="none">Без абонемента</SelectItem>
+                        <FormControl>
+                          <div className="flex flex-wrap gap-2">
+                            <Button
+                              type="button"
+                              size="sm"
+                              variant={
+                                watchedSubscriptionId == null
+                                  ? "default"
+                                  : "outline"
+                              }
+                              onClick={() => handleSelectSubscription(null)}
+                              data-testid="subscription-chip-none"
+                            >
+                              Без абонемента
+                            </Button>
                             {subscriptions.map((sub) => (
-                              <SelectItem key={sub.id} value={sub.id}>
+                              <Button
+                                key={sub.id}
+                                type="button"
+                                size="sm"
+                                variant={
+                                  watchedSubscriptionId === sub.id
+                                    ? "default"
+                                    : "outline"
+                                }
+                                onClick={() =>
+                                  handleSelectSubscription(sub.id)
+                                }
+                                className="gap-1"
+                                data-testid={`subscription-chip-${sub.id}`}
+                              >
                                 {sub.name}
-                              </SelectItem>
+                              </Button>
                             ))}
-                          </SelectContent>
-                        </Select>
+                          </div>
+                        </FormControl>
                         <FormMessage />
-                        {selectedSubscription && settings?.baseTrainingPrice && (
-                          <p className="text-sm text-muted-foreground mt-1">
-                            Коэффициент: {selectedSubscription.coefficient.toFixed(2)}. Списания
-                            будут по цене{" "}
-                            {Math.round(
-                              settings.baseTrainingPrice * selectedSubscription.coefficient
-                            )}{" "}
-                            ₽
-                          </p>
-                        )}
+                        {selectedSubscription &&
+                          settings?.baseTrainingPrice && (
+                            <p className="text-sm text-muted-foreground mt-1">
+                              Коэффициент:{" "}
+                              {selectedSubscription.coefficient.toFixed(2)}.
+                              Списания будут по цене{" "}
+                              {Math.round(
+                                settings.baseTrainingPrice *
+                                  selectedSubscription.coefficient
+                              )}{" "}
+                              ₽
+                            </p>
+                          )}
                       </FormItem>
                     )}
                   />
@@ -360,7 +448,9 @@ export default function PaymentsPage() {
                   <Button
                     type="submit"
                     className="w-full"
-                    disabled={createPaymentMutation.isPending || !selectedPlayer}
+                    disabled={
+                      createPaymentMutation.isPending || !selectedPlayer
+                    }
                     data-testid="button-save-payment"
                   >
                     {createPaymentMutation.isPending ? (
@@ -379,10 +469,16 @@ export default function PaymentsPage() {
             <CardHeader className="pb-4">
               <div className="flex items-center justify-between gap-4 flex-wrap">
                 <CardTitle className="text-lg font-medium">
-                  Платежи за {format(selectedDate, "d MMMM", { locale: ru })}
+                  Платежи за{" "}
+                  {format(selectedDate, "d MMMM", {
+                    locale: ru,
+                  })}
                 </CardTitle>
                 {totalPayments > 0 && (
-                  <div className="text-sm text-muted-foreground" data-testid="text-payments-summary">
+                  <div
+                    className="text-sm text-muted-foreground"
+                    data-testid="text-payments-summary"
+                  >
                     Всего платежей: {totalPayments}, сумма:{" "}
                     <span className="font-mono font-medium text-foreground">
                       {totalSum.toLocaleString("ru-RU")} ₽
@@ -397,9 +493,14 @@ export default function PaymentsPage() {
                   <Loader2 className="w-6 h-6 animate-spin text-muted-foreground" />
                 </div>
               ) : payments.length === 0 ? (
-                <div className="text-center py-12 text-muted-foreground" data-testid="text-empty-payments">
+                <div
+                  className="text-center py-12 text-muted-foreground"
+                  data-testid="text-empty-payments"
+                >
                   <p>В этот день пока нет платежей.</p>
-                  <p className="text-sm mt-1">Внесите первую оплату через форму слева.</p>
+                  <p className="text-sm mt-1">
+                    Внесите первую оплату через форму слева.
+                  </p>
                 </div>
               ) : (
                 <div className="overflow-x-auto">
@@ -414,12 +515,16 @@ export default function PaymentsPage() {
                     </TableHeader>
                     <TableBody>
                       {payments.map((payment) => (
-                        <TableRow key={payment.id} data-testid={`row-payment-${payment.id}`}>
+                        <TableRow
+                          key={payment.id}
+                          data-testid={`row-payment-${payment.id}`}
+                        >
                           <TableCell className="font-mono text-sm text-muted-foreground">
                             {payment.time}
                           </TableCell>
                           <TableCell className="font-medium">
-                            {payment.player.firstName} {payment.player.lastName}
+                            {payment.player.firstName}{" "}
+                            {payment.player.lastName}
                           </TableCell>
                           <TableCell className="text-right font-mono">
                             {payment.amount.toLocaleString("ru-RU")}
